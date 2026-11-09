@@ -32,3 +32,42 @@ spec NoVersionReuse observes eSync {
     }
   }
 }
+
+// Liveness: every sync tick must put at least one sync message on the wire.
+// SendSync sends 0, 1, or 2 copies, so a tick can be a no-op. Since there is
+// no retry/anti-entropy, a dropped tick can leave the shared subset divergent
+// forever. `eSyncTickDone` is test instrumentation: the peer sends it after
+// handling a tick, so the monitor can tell "no message sent" from "not handled
+// yet".
+spec EverySyncTickSends observes eSyncTick, eSync, eSyncTickDone {
+  var sawSync: bool;
+
+  start state Waiting {
+    on eSyncTick do {
+      sawSync = false;
+      goto Pending;
+    }
+    on eSync do { }
+    on eSyncTickDone do { }
+  }
+
+  // While a tick is being handled, at least one eSync must be observed.
+  hot state Pending {
+    on eSync do { sawSync = true; }
+    on eSyncTickDone do {
+      if (!sawSync) {
+        goto Missed;
+      }
+      goto Waiting;
+    }
+    on eSyncTick do { }   // the test driver serializes ticks
+  }
+
+  // A tick was handled without producing any sync message. Stay hot forever
+  // so the checker reports a liveness violation at the end of the execution.
+  hot state Missed {
+    on eSyncTick do { }
+    on eSync do { }
+    on eSyncTickDone do { }
+  }
+}

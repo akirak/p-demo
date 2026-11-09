@@ -10,14 +10,16 @@ machine TestDriver {
       var i: int;
       pa = new PeerA(1);
       pb = new PeerB(2);
-      send pa, ePeer, pb;
-      send pb, ePeer, pa;
+      send pa, ePeer, (peer = pb, driver = this);
+      send pb, ePeer, (peer = pa, driver = this);
       i = 0;
       while (i < 4) {
         if ($) { EditA(pa); } else { EditB(pb); }
         i = i + 1;
       }
     }
+    on eReady do { }
+    on eSyncTickDone do { }
   }
 
   // PeerA edits its private field a and the shared subset (b, c).
@@ -68,10 +70,54 @@ machine TestDriver {
   }
 }
 
-module SyncModule = { PeerA, PeerB, TestDriver };
+// Stress driver for the best-effort sender: tick PeerA many times, waiting for
+// each tick to be handled before issuing the next one. This lets the liveness
+// spec pair the eSync messages a tick actually sent with that tick.
+machine SyncLossDriver {
+  var pa: PeerA;
+  var pb: PeerB;
+  var ready: int;
+  var ticksLeft: int;
+
+  start state Init {
+    entry {
+      pa = new PeerA(1);
+      pb = new PeerB(2);
+      ready = 0;
+      send pa, ePeer, (peer = pb, driver = this);
+      send pb, ePeer, (peer = pa, driver = this);
+    }
+
+    on eReady do {
+      ready = ready + 1;
+      if (ready == 2) {
+        ticksLeft = 20;
+        ticksLeft = ticksLeft - 1;
+        send pa, eSyncTick;
+        goto Run;
+      }
+    }
+  }
+
+  state Run {
+    on eSyncTickDone do {
+      if (ticksLeft > 0) {
+        ticksLeft = ticksLeft - 1;
+        send pa, eSyncTick;
+      }
+    }
+  }
+}
+
+module SyncModule = { PeerA, PeerB, TestDriver, SyncLossDriver };
 
 test tcSync [main = TestDriver]:
   assert NoPartialObjectOnWire in SyncModule;
 
 test tcNoVersionReuse [main = TestDriver]:
   assert NoVersionReuse in SyncModule;
+
+// This test is expected to fail: some sync tick sends zero messages, and there
+// is no retry, so the shared subset is not guaranteed to converge.
+test tcLostTick [main = SyncLossDriver]:
+  assert EverySyncTickSends in SyncModule;

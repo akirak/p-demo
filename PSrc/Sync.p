@@ -15,8 +15,11 @@ type tVersion = (ts: int, rid: int);
 type tShared = (b: int, c: int, ver: tVersion);   // the part both peers understand
 type tObjA = (a: int, shared: tShared);           // PeerA's fields
 type tObjB = (shared: tShared, d: int);           // PeerB's fields
+type tPeerInfo = (peer: machine, driver: machine);
 
-event ePeer: machine;      // wire up the other replica
+event ePeer: tPeerInfo;    // wire up the other replica and the test driver
+event eReady;              // sent to the driver once the peer is wired up
+event eSyncTickDone;       // sent to the driver after a sync tick has been handled
 event eBeginEdit;
 event eSetA: int;          // PeerA-only field
 event eSetB: int;          // shared field
@@ -33,6 +36,7 @@ fun Newer(x: tVersion, y: tVersion): bool {
 machine PeerA {
   var id: int;
   var peer: machine;
+  var driver: machine;
   var clock: int;
   var obj: tObjA;
   var sharedDirty: bool;   // did this transaction touch the shared subset?
@@ -44,13 +48,18 @@ machine PeerA {
       obj = (a = 0, shared = (b = 0, c = 0, ver = (ts = 0, rid = 0)));
       sharedDirty = false;
     }
-    on ePeer do (p: machine) { peer = p; goto Idle; }
+    on ePeer do (p: tPeerInfo) {
+      peer = p.peer;
+      driver = p.driver;
+      send driver, eReady;
+      goto Idle;
+    }
   }
 
   // Idle: no open local transaction => syncing is allowed in both directions.
   state Idle {
     on eBeginEdit goto Editing;
-    on eSyncTick do SendSync;
+    on eSyncTick do HandleSyncTick;
     on eSync do ApplySync;
   }
 
@@ -72,6 +81,13 @@ machine PeerA {
       }
       goto Idle;
     }
+  }
+
+  fun HandleSyncTick() {
+    SendSync();
+    // Tell the test driver the tick has been handled, even if both sends were
+    // dropped. This is test instrumentation, not part of the sync protocol.
+    send driver, eSyncTickDone;
   }
 
   fun SendSync() {
@@ -98,6 +114,7 @@ machine PeerA {
 machine PeerB {
   var id: int;
   var peer: machine;
+  var driver: machine;
   var clock: int;
   var obj: tObjB;
   var sharedDirty: bool;
@@ -109,12 +126,17 @@ machine PeerB {
       obj = (shared = (b = 0, c = 0, ver = (ts = 0, rid = 0)), d = 0);
       sharedDirty = false;
     }
-    on ePeer do (p: machine) { peer = p; goto Idle; }
+    on ePeer do (p: tPeerInfo) {
+      peer = p.peer;
+      driver = p.driver;
+      send driver, eReady;
+      goto Idle;
+    }
   }
 
   state Idle {
     on eBeginEdit goto Editing;
-    on eSyncTick do SendSync;
+    on eSyncTick do HandleSyncTick;
     on eSync do ApplySync;
   }
 
@@ -133,6 +155,11 @@ machine PeerB {
       }
       goto Idle;
     }
+  }
+
+  fun HandleSyncTick() {
+    SendSync();
+    send driver, eSyncTickDone;
   }
 
   fun SendSync() {
