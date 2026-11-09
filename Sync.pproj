@@ -1,7 +1,9 @@
 <Project>
   <ProjectName>Sync</ProjectName>
   <InputFiles>
-    <PFile>./Sync.p</PFile>
+    <PFile>./PSrc/Sync.p</PFile>
+    <PFile>./PSpec/SyncSpec.p</PFile>
+    <PFile>./PTst/SyncTest.p</PFile>
   </InputFiles>
   <OutputDir>./PGenerated</OutputDir>
 </Project>
