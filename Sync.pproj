@@ -1,0 +1,7 @@
+<Project>
+  <ProjectName>Sync</ProjectName>
+  <InputFiles>
+    <PFile>./Sync.p</PFile>
+  </InputFiles>
+  <OutputDir>./PGenerated</OutputDir>
+</Project>
