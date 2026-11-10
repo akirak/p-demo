@@ -17,17 +17,24 @@ type tObjA = (a: int, shared: tShared);           // PeerA's fields
 type tObjB = (shared: tShared, d: int);           // PeerB's fields
 type tPeerInfo = (peer: machine, driver: machine);
 
-event ePeer: tPeerInfo;    // wire up the other replica and the test driver
-event eReady;              // sent to the driver once the peer is wired up
-event eSyncTickDone;       // sent to the driver after a sync tick has been handled
+// Explicit POST API exposed by each peer: submit a shared subset, get the
+// peer's resulting version back. `from` is the caller (normally the other peer)
+// so the response can be routed without a separate out-of-band address.
+type tPost = (from: machine, body: tShared);
+type tPostResponse = (accepted: bool, ver: tVersion);
+
+event ePeer: tPeerInfo;         // wire up the other replica and the test driver
+event eReady;                   // sent to the driver once the peer is wired up
+event eSyncTickDone;            // sent to the driver after a sync tick has been handled
 event eBeginEdit;
-event eSetA: int;          // PeerA-only field
-event eSetB: int;          // shared field
-event eSetC: int;          // shared field
-event eSetD: int;          // PeerB-only field
+event eSetA: int;               // PeerA-only field
+event eSetB: int;               // shared field
+event eSetC: int;               // shared field
+event eSetD: int;               // PeerB-only field
 event eCommit;
-event eSyncTick;           // "now may be a good time to sync" (from the environment)
-event eSync: tShared;      // the actual sync message: only the shared subset
+event eSyncTick;                // "now may be a good time to sync" (from the environment)
+event ePost: tPost;             // POST /shared: only the shared subset goes on the wire
+event ePostResponse: tPostResponse;
 
 fun Newer(x: tVersion, y: tVersion): bool {
   return x.ts > y.ts || (x.ts == y.ts && x.rid > y.rid);
@@ -60,13 +67,15 @@ machine PeerA {
   state Idle {
     on eBeginEdit goto Editing;
     on eSyncTick do HandleSyncTick;
-    on eSync do ApplySync;
+    on ePost do HandlePost;
+    on ePostResponse do HandlePostResponse;
   }
 
   // Editing: CONSTRAINT -- sync is postponed, not dropped.
   // `defer` keeps the events in the queue until a state that handles them.
   state Editing {
-    defer eSync, eSyncTick;
+    defer ePost, eSyncTick;
+    on ePostResponse do HandlePostResponse;
     on eSetA do (v: int) { obj.a = v; }
     on eSetB do (v: int) { obj.shared.b = v; sharedDirty = true; }
     on eSetC do (v: int) { obj.shared.c = v; sharedDirty = true; }
@@ -95,9 +104,31 @@ machine PeerA {
     // Build a fresh value so later local edits cannot mutate what was sent.
     var out: tShared;
     out = (b = obj.shared.b, c = obj.shared.c, ver = obj.shared.ver);
-    // The channel may lose or duplicate: 0, 1, or 2 copies get sent.
-    if ($) { send peer, eSync, out; }
-    if ($) { send peer, eSync, out; }
+    // The channel may lose or duplicate: 0, 1, or 2 POSTs get sent.
+    if ($) { Post(peer, out); }
+    if ($) { Post(peer, out); }
+  }
+
+  // Client side of the explicit POST API. The peer on the receiving end handles
+  // `ePost`, merges the body, and replies with `ePostResponse`.
+  fun Post(target: machine, body: tShared) {
+    send target, ePost, (from = this, body = body);
+  }
+
+  // Server side of the POST API. A POST is accepted in Idle; while a local
+  // transaction is open it is deferred like any other inbound sync.
+  fun HandlePost(req: tPost) {
+    var accepted: bool;
+    accepted = Newer(req.body.ver, obj.shared.ver);
+    ApplySync(req.body);
+    send req.from, ePostResponse, (accepted = accepted, ver = obj.shared.ver);
+  }
+
+  fun HandlePostResponse(resp: tPostResponse) {
+    // A POST response confirms the remote version, just like an inbound sync.
+    if (resp.ver.ts > clock) {
+      clock = resp.ver.ts;
+    }
   }
 
   fun ApplySync(incoming: tShared) {
@@ -137,11 +168,13 @@ machine PeerB {
   state Idle {
     on eBeginEdit goto Editing;
     on eSyncTick do HandleSyncTick;
-    on eSync do ApplySync;
+    on ePost do HandlePost;
+    on ePostResponse do HandlePostResponse;
   }
 
   state Editing {
-    defer eSync, eSyncTick;
+    defer ePost, eSyncTick;
+    on ePostResponse do HandlePostResponse;
     on eSetD do (v: int) { obj.d = v; }
     on eSetB do (v: int) { obj.shared.b = v; sharedDirty = true; }
     on eSetC do (v: int) { obj.shared.c = v; sharedDirty = true; }
@@ -167,8 +200,25 @@ machine PeerB {
     // Build a fresh value so later local edits cannot mutate what was sent.
     var out: tShared;
     out = (b = obj.shared.b, c = obj.shared.c, ver = obj.shared.ver);
-    if ($) { send peer, eSync, out; }
-    if ($) { send peer, eSync, out; }
+    if ($) { Post(peer, out); }
+    if ($) { Post(peer, out); }
+  }
+
+  fun Post(target: machine, body: tShared) {
+    send target, ePost, (from = this, body = body);
+  }
+
+  fun HandlePost(req: tPost) {
+    var accepted: bool;
+    accepted = Newer(req.body.ver, obj.shared.ver);
+    ApplySync(req.body);
+    send req.from, ePostResponse, (accepted = accepted, ver = obj.shared.ver);
+  }
+
+  fun HandlePostResponse(resp: tPostResponse) {
+    if (resp.ver.ts > clock) {
+      clock = resp.ver.ts;
+    }
   }
 
   fun ApplySync(incoming: tShared) {

@@ -72,7 +72,7 @@ machine TestDriver {
 
 // Stress driver for the best-effort sender: tick PeerA many times, waiting for
 // each tick to be handled before issuing the next one. This lets the liveness
-// spec pair the eSync messages a tick actually sent with that tick.
+// spec pair the POSTs a tick actually sent with that tick.
 machine SyncLossDriver {
   var pa: PeerA;
   var pb: PeerB;
@@ -109,13 +109,62 @@ machine SyncLossDriver {
   }
 }
 
-module SyncModule = { PeerA, PeerB, TestDriver, SyncLossDriver };
+// Exercises the explicit POST API on both peers. PeerA receives the POST while
+// a local transaction is open, so the request must be deferred (not dropped)
+// and answered after the commit. PeerB is idle, so it answers immediately.
+machine PostDriver {
+  var pa: PeerA;
+  var pb: PeerB;
+  var ready: int;
+  var responses: int;
+
+  start state Init {
+    entry {
+      pa = new PeerA(1);
+      pb = new PeerB(2);
+      ready = 0;
+      responses = 0;
+      send pa, ePeer, (peer = pb, driver = this);
+      send pb, ePeer, (peer = pa, driver = this);
+    }
+
+    on eReady do {
+      ready = ready + 1;
+      if (ready == 2) {
+        send pa, eBeginEdit;
+        send pa, eSetB, 1;
+        send pa, eSetC, 2;
+        send pa, ePost,
+             (from = this, body = (b = 3, c = 4, ver = (ts = 1, rid = 10)));
+        send pa, eCommit;
+
+        send pb, ePost,
+             (from = this, body = (b = 5, c = 6, ver = (ts = 1, rid = 20)));
+        goto Run;
+      }
+    }
+  }
+
+  state Run {
+    on ePostResponse do (resp: tPostResponse) {
+      assert resp.accepted, "a newer POST must be accepted";
+      responses = responses + 1;
+      assert responses <= 2, "each POST must be answered exactly once";
+    }
+    on eSyncTickDone do { }
+  }
+}
+
+module SyncModule = { PeerA, PeerB, TestDriver, SyncLossDriver, PostDriver };
 
 test tcSync [main = TestDriver]:
   assert NoPartialObjectOnWire in SyncModule;
 
 test tcNoVersionReuse [main = TestDriver]:
   assert NoVersionReuse in SyncModule;
+
+test tcPostApi [main = PostDriver]:
+  assert EveryPostGetsResponse in SyncModule;
 
 // This test is expected to fail: some sync tick sends zero messages, and there
 // is no retry, so the shared subset is not guaranteed to converge.
